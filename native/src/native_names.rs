@@ -15,6 +15,7 @@ thread_local! {
     static TEST_METADATA_STALL: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
     static TEST_METADATA_FD: std::cell::Cell<RawFd> = const { std::cell::Cell::new(-1) };
     static TEST_METADATA_INTERRUPTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_GETPATH_ALIAS: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -159,6 +160,60 @@ pub fn identity(info: &libc::stat) -> [u64; 2] {
         id
     }
 }
+#[cfg(target_os = "macos")]
+fn listed_spelling(parent: RawFd, name: &str) -> io::Result<String> {
+    use std::os::fd::IntoRawFd;
+    struct Stream(*mut libc::DIR);
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            unsafe { libc::closedir(self.0) };
+        }
+    }
+    let deadline = crate::directory_io::DirectoryIo::begin()?;
+    let listing = open_at(parent, ".", libc::O_RDONLY | libc::O_DIRECTORY)?;
+    let materialization = DirectoryMaterialization::begin()?;
+    let raw = listing.into_raw_fd();
+    let pointer = unsafe { libc::fdopendir(raw) };
+    let error = pointer.is_null().then(io::Error::last_os_error);
+    drop(materialization);
+    if pointer.is_null() {
+        unsafe { libc::close(raw) };
+        deadline.check()?;
+        return Err(error.unwrap());
+    }
+    let stream = Stream(pointer);
+    deadline.progress()?;
+    let mut matched = None;
+    loop {
+        deadline.check()?;
+        let (entry, error) = {
+            let _materialization = DirectoryMaterialization::begin()?;
+            unsafe { *libc::__error() = 0 };
+            let entry = unsafe { libc::readdir(stream.0) };
+            (entry, io::Error::last_os_error())
+        };
+        #[cfg(test)]
+        test_metadata_checkpoint("alias_listing", unsafe { libc::dirfd(stream.0) });
+        deadline.progress()?;
+        if entry.is_null() {
+            if error.raw_os_error() != Some(0) {
+                return Err(error);
+            }
+            break;
+        }
+        let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        let Ok(candidate) = std::str::from_utf8(bytes) else {
+            continue;
+        };
+        if candidate.nfc().eq(name.nfc()) {
+            if matched.is_some() {
+                return Err(io::Error::from_raw_os_error(libc::ESTALE));
+            }
+            matched = Some(candidate.to_owned());
+        }
+    }
+    matched.ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))
+}
 pub fn actual_stored_name(parent: RawFd, name: &str) -> io::Result<String> {
     validate_name(name)?;
     #[cfg(not(target_os = "macos"))]
@@ -186,6 +241,24 @@ pub fn actual_stored_name(parent: RawFd, name: &str) -> io::Result<String> {
         let path =
             std::str::from_utf8(bytes).map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
         let actual = path.rsplit('/').next().unwrap_or_default();
+        #[cfg(test)]
+        let alias = TEST_GETPATH_ALIAS.with(|alias| alias.borrow_mut().take());
+        #[cfg(test)]
+        let actual = alias.as_deref().unwrap_or(actual);
+        // F_GETPATH can name another hard link to the held inode. Only a
+        // normalization-equivalent directory entry can identify this request.
+        let listed;
+        let actual = if actual.nfc().ne(name.nfc()) {
+            let info = fstat(held.as_raw_fd());
+            deadline.progress()?;
+            if info?.st_nlink < 2 {
+                return Err(io::Error::from_raw_os_error(libc::ESTALE));
+            }
+            listed = listed_spelling(parent, name)?;
+            listed.as_str()
+        } else {
+            actual
+        };
         validate_name(actual)?;
         let mapped = stat_at(parent, actual);
         #[cfg(test)]
@@ -202,8 +275,8 @@ pub fn actual_stored_name(parent: RawFd, name: &str) -> io::Result<String> {
         Ok(actual.to_owned())
     }
 }
-/// Resolve one candidate spelling and bind it to the expected inode without
-/// enumerating siblings. Unrelated hard-link aliases are never accepted.
+/// Resolve one candidate spelling and bind it to the expected inode. An
+/// unrelated descriptor hard-link alias requires a directory-listing fallback.
 pub fn candidate_stored_name(
     parent: RawFd,
     name: &str,
@@ -321,10 +394,44 @@ pub fn marker_remove(fd: RawFd, key: &str, token: &[u8]) -> io::Result<libc::sta
 mod tests {
     use super::*;
     #[cfg(target_os = "macos")]
+    #[test]
+    fn stored_spelling_disambiguates_unrelated_descriptor_hardlink_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let name: String = "한글".nfd().collect();
+        std::fs::write(temp.path().join(&name), b"fixture").unwrap();
+        std::fs::hard_link(temp.path().join(&name), temp.path().join("alias")).unwrap();
+        let parent = File::open(temp.path()).unwrap();
+        TEST_GETPATH_ALIAS.with(|alias| *alias.borrow_mut() = Some("alias".into()));
+        assert_eq!(actual_stored_name(parent.as_raw_fd(), &name).unwrap(), name);
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stored_spelling_alias_listing_remains_within_metadata_deadline() {
+        TEST_GETPATH_ALIAS.with(|alias| *alias.borrow_mut() = Some("alias".into()));
+        metadata_timeout("alias_listing", true);
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stored_spelling_rejects_unrelated_descriptor_name_without_hardlink_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("file"), b"fixture").unwrap();
+        let parent = File::open(temp.path()).unwrap();
+        TEST_GETPATH_ALIAS.with(|alias| *alias.borrow_mut() = Some("alias".into()));
+        assert_eq!(
+            actual_stored_name(parent.as_raw_fd(), "file")
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ESTALE)
+        );
+    }
+    #[cfg(target_os = "macos")]
     fn metadata_timeout(stage: &'static str, stored_name: bool) {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("file");
         std::fs::write(&path, b"fixture").unwrap();
+        if stage == "alias_listing" {
+            std::fs::hard_link(&path, temp.path().join("alias")).unwrap();
+        }
         let parent = File::open(temp.path()).unwrap();
         let original = stat_at(parent.as_raw_fd(), "file").unwrap().unwrap();
         TEST_METADATA_STALL.set(Some(stage));

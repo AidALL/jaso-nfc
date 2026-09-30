@@ -2,9 +2,9 @@
 
 [한국어 사용 설명서](usage.md) · [English user guide](usage.en.md)
 
-[다운로드 / Download](https://github.com/garlicvread/jaso-nfc/releases/download/v0.2.1/Jaso-NFC-0.2.1-arm64-local.dmg) · [릴리스 정보 / Release notes](https://github.com/garlicvread/jaso-nfc/releases/tag/v0.2.1)
+[다운로드 / Download](https://github.com/garlicvread/jaso-nfc/releases/download/v0.2.2/Jaso-NFC-0.2.2-arm64-local.dmg) · [릴리스 정보 / Release notes](https://github.com/garlicvread/jaso-nfc/releases/tag/v0.2.2)
 
-0.2.1 · Apple Silicon Mac · macOS 13 이상 / macOS 13 or later
+0.2.2 · Apple Silicon Mac · macOS 13 이상 / macOS 13 or later
 
 ## 설치하기 / Install the app
 
@@ -81,7 +81,7 @@ sh scripts/build-installer.sh --app 'dist/Jaso NFC.app'
 
 The output is `dist/Jaso-NFC-<version>-<architecture>-local.dmg` for the build machine's architecture. Packaging checks the payload, metadata, installation instructions, MIT license, and accompanying `.dmg.sha256` checksum. The release includes that checksum for download-integrity checks. See [build validation](development.md) for the test workflow.
 
-The local package is ad hoc signed and not notarized. The current 0.2.1 download is a `-local` package of this kind, so macOS asks for confirmation on the first launch, as described in [macOS blocks the installer](#macos-blocks-the-installer). Company release packages are built with `sh scripts/build-installer.sh --release` on a company-controlled Mac and are named without `-local`; the process is in [Release signing and notarization](releasing.md).
+The local package is ad hoc signed and not notarized. The current 0.2.2 download is a `-local` package of this kind, so macOS asks for confirmation on the first launch, as described in [macOS blocks the installer](#macos-blocks-the-installer). Company release packages are built with `sh scripts/build-installer.sh --release` on a company-controlled Mac and are named without `-local`; the process is in [Release signing and notarization](releasing.md).
 
 ## Native development build
 

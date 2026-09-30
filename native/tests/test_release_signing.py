@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -119,7 +120,7 @@ elif command == "cargo":
     target = pathlib.Path("target/release/jaso-nfc")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(f"#!{sys.executable}\nTOOLS = {str(tools)!r}\n" + r"""
-import json, pathlib, sys
+import json, pathlib, plistlib, sys
 tools = pathlib.Path(TOOLS)
 args = sys.argv[1:]
 with (tools / "events.jsonl").open("a") as stream:
@@ -128,7 +129,8 @@ assert args in (["--version"], ["--help"]), "Only safe CLI smoke checks are allo
 state = json.loads((tools / "state.json").read_text())
 if state.get("fail_native_smoke") == args[0]:
     raise SystemExit(29)
-print("jaso-nfc 0.2.1" if args == ["--version"] else "Usage: jaso-nfc <COMMAND>")
+version = plistlib.loads(pathlib.Path("native/macos/Info.plist").read_bytes())["CFBundleShortVersionString"]
+print("jaso-nfc " + version if args == ["--version"] else "Usage: jaso-nfc <COMMAND>")
 """)
     target.chmod(0o755)
 elif command == "iconutil":
@@ -176,7 +178,7 @@ if json.loads((tools / "state.json").read_text()).get("fail_native_fixture") == 
 '''
 
 PACKAGE_CHECK = r'''
-import hashlib, json, os, pathlib
+import hashlib, json, os, pathlib, plistlib
 tools = pathlib.Path(__file__).resolve().parents[3] / "tools"
 with (tools / "events.jsonl").open("a") as stream:
     stream.write(json.dumps(["package-check"]) + "\n")
@@ -192,12 +194,13 @@ checksum, basename = image.with_suffix(".dmg.sha256").read_text().split()
 assert checksum == hashlib.sha256(image.read_bytes()).hexdigest()
 assert basename == image.name
 assert (packaged / "Contents/Resources/LICENSE.txt").is_file()
+version = plistlib.loads((source / "Contents/Info.plist").read_bytes())["CFBundleShortVersionString"]
 if os.environ["JASO_RELEASE_MODE"] == "1":
     assert (packaged / "Contents/CodeResources").is_file()
     assert image.read_bytes().endswith(b"STAPLED DMG FIXTURE")
-    assert image.name == "Jaso-NFC-0.2.1-arm64.dmg"
+    assert image.name == f"Jaso-NFC-{version}-arm64.dmg"
 else:
-    assert image.name == "Jaso-NFC-0.2.1-arm64-local.dmg"
+    assert image.name == f"Jaso-NFC-{version}-arm64-local.dmg"
 '''
 
 
@@ -257,6 +260,7 @@ class ReleaseSigning(unittest.TestCase):
         (self.app / "Contents/MacOS").mkdir(parents=True)
         (self.app / "Contents/Resources").mkdir()
         shutil.copy2(PROJECT / "native/macos/Info.plist", self.app / "Contents/Info.plist")
+        self.version = plistlib.loads((self.app / "Contents/Info.plist").read_bytes())["CFBundleShortVersionString"]
         shutil.copy2(PROJECT / "LICENSE", self.app / "Contents/Resources/LICENSE.txt")
         (self.app / "Contents/Resources/JasoNFC.icns").write_text("ICON FIXTURE")
         for name in ("Jaso NFC", "jaso-nfc"):
@@ -295,7 +299,7 @@ class ReleaseSigning(unittest.TestCase):
                 for path in self.app.rglob("*") if path.is_file()}
 
     def output_pair(self):
-        image = self.project / "dist/Jaso-NFC-0.2.1-arm64.dmg"
+        image = self.project / f"dist/Jaso-NFC-{self.version}-arm64.dmg"
         return image, image.with_suffix(".dmg.sha256")
 
     def previous_pair(self):
@@ -434,7 +438,7 @@ class ReleaseSigning(unittest.TestCase):
         dmg_validate = max(index for index, event in enumerate(events) if event[:3] == ["xcrun", "stapler", "validate"])
         self.assertGreater(checksum_index, dmg_validate)
         self.assertGreater(events.index(["package-check"]), checksum_index)
-        image = self.project / "dist/Jaso-NFC-0.2.1-arm64.dmg"
+        image = self.output_pair()[0]
         self.assertEqual(image.with_suffix(".dmg.sha256").read_text().split(),
                          [hashlib.sha256(image.read_bytes()).hexdigest(), image.name])
         self.assertEqual(len(list((self.project / "build").glob("notary.*/*/submission.json"))), 2)
@@ -480,8 +484,8 @@ class ReleaseSigning(unittest.TestCase):
     def test_failed_release_preserves_existing_final_files(self):
         output = self.project / "dist"
         output.mkdir()
-        previous = {"Jaso-NFC-0.2.1-arm64.dmg": b"PREVIOUS DMG",
-                    "Jaso-NFC-0.2.1-arm64.dmg.sha256": b"PREVIOUS CHECKSUM"}
+        image, checksum = self.output_pair()
+        previous = {image.name: b"PREVIOUS DMG", checksum.name: b"PREVIOUS CHECKSUM"}
         for name, content in previous.items():
             (output / name).write_bytes(content)
         self.configure(fail_package=True)
@@ -688,7 +692,7 @@ class ReleaseSigning(unittest.TestCase):
         self.assertEqual(native.returncode, 0, native.stdout + native.stderr)
         result = self.installer()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertTrue((self.project / "dist/Jaso-NFC-0.2.1-arm64-local.dmg").is_file())
+        self.assertTrue((self.project / f"dist/Jaso-NFC-{self.version}-arm64-local.dmg").is_file())
         self.assertFalse(any(event[0] in ("security", "xcrun", "spctl") for event in self.events()))
         signs = [event for event in self.events() if event[0] == "codesign" and "--sign" in event]
         self.assertEqual(len(signs), 3)

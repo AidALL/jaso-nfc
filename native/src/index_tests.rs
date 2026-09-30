@@ -3754,6 +3754,47 @@ fn package_events_observe_the_entry_without_scheduling_its_contents() -> Result<
 
 #[cfg(feature = "normalizer")]
 #[test]
+fn missing_directory_persisted_retries_drain_through_the_worker() -> Result<()> {
+    let f = Fixture::new()?;
+    let missing = format!("{}/removed", f.root);
+    let retry_path = f.temp.path().join("retry.json");
+    let mut retry = crate::journal::RetryState::new(Some(retry_path.clone()), 900., 86400.)?;
+    for name in ["first", "nested/second"] {
+        let source = format!("{missing}/{name}");
+        retry.failure(&source, &source, "dataless-file");
+        retry.entries.get_mut(&source).unwrap().next_retry = 1.0;
+    }
+    retry.save()?;
+    let mut normalizer = crate::normalizer::Normalizer::new(
+        f.scan.policy.clone(),
+        Some(f.temp.path().join("renames.jsonl")),
+        Some(retry_path.clone()),
+        Some(f.temp.path().join("pending.json")),
+        true,
+    )?;
+    f.index.bootstrap_jobs()?;
+    let mut idle = false;
+    for _ in 0..12 {
+        if !f.index.work(&mut normalizer)? {
+            idle = true;
+            break;
+        }
+    }
+    assert!(idle, "missing-folder retries keep the real worker busy");
+    assert_eq!(f.index.status()?["pending_jobs"], 0);
+    assert_eq!(f.index.status()?["baseline_complete"], true);
+    assert!(normalizer.retry_paths(now())?.is_empty());
+    assert!(
+        crate::journal::RetryState::new(Some(retry_path), 900., 86400.)?
+            .entries
+            .is_empty()
+    );
+    assert!(!f.index.work(&mut normalizer)?);
+    Ok(())
+}
+
+#[cfg(feature = "normalizer")]
+#[test]
 fn real_missing_or_replaced_directory_still_reconciles_its_parent() -> Result<()> {
     for replacement in ["missing", "file", "symlink"] {
         let f = Fixture::new()?;

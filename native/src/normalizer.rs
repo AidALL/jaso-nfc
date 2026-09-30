@@ -1431,8 +1431,17 @@ impl Normalizer {
         }
     }
     fn retire_directory_retries(&mut self, path: &str) {
+        let directory = Path::new(path);
         self.retry.entries.retain(|source, _| {
-            Path::new(source) == Path::new(path) || !Path::new(source).starts_with(path)
+            Path::new(source) == directory || !Path::new(source).starts_with(directory)
+        });
+        crate::activity::current(|activity| {
+            for source in activity.unresolved_processing_paths() {
+                let source_path = Path::new(&source);
+                if source_path != directory && source_path.starts_with(directory) {
+                    activity.resolve("processing", Some(&source), "absent");
+                }
+            }
         });
     }
     fn walk_step(&mut self, request: &str, path: &str, result: &mut ScanResult) -> Result<()> {
@@ -1473,11 +1482,16 @@ impl Normalizer {
         let directory = match observed {
             Ok(directory) => directory,
             Err(error) => {
-                if saved.is_some()
-                    || !error
+                if saved.is_none()
+                    && error
                         .downcast_ref::<io::Error>()
                         .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
                 {
+                    // Confirmed absence completes a fresh scan. Retire its
+                    // child retries too, or the worker immediately queues this
+                    // missing directory again from their overdue deadlines.
+                    self.retire_directory_retries(path);
+                } else {
                     Self::add_error(result, path, &error);
                 }
                 return Ok(());
@@ -4254,19 +4268,25 @@ mod tests {
     #[test]
     fn retry_cleanup_waits_for_successful_parent_enumeration() {
         use std::os::unix::fs::PermissionsExt;
-        let (_temp, mut engine, root) = fixture();
-        let parent = root.join("blocked");
-        std::fs::create_dir(&parent).unwrap();
-        let source = parent.join("missing").to_string_lossy().into_owned();
-        engine.retry.failure(&source, &source, "1");
-        engine.retry.entries.get_mut(&source).unwrap().next_retry = 1.0;
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o0)).unwrap();
-        let result = engine.reconcile(parent.to_str().unwrap(), false).unwrap();
-        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(!result.errors.is_empty());
-        assert!(engine.retry.entries.contains_key(&source));
-        engine.reconcile(parent.to_str().unwrap(), false).unwrap();
-        assert!(engine.retry.entries.is_empty());
+        for bounded in [false, true] {
+            let (_temp, mut engine, root) = fixture();
+            let parent = root.join("blocked");
+            std::fs::create_dir(&parent).unwrap();
+            let source = parent.join("missing").to_string_lossy().into_owned();
+            engine.retry.failure(&source, &source, "1");
+            engine.retry.entries.get_mut(&source).unwrap().next_retry = 1.0;
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o0)).unwrap();
+            let result = engine
+                .reconcile_inner(parent.to_str().unwrap(), false, bounded)
+                .unwrap();
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(!result.errors.is_empty());
+            assert!(engine.retry.entries.contains_key(&source));
+            engine
+                .reconcile_inner(parent.to_str().unwrap(), false, bounded)
+                .unwrap();
+            assert!(engine.retry.entries.is_empty());
+        }
     }
 
     #[test]
@@ -4294,14 +4314,96 @@ mod tests {
 
     #[test]
     fn retry_cleanup_handles_a_removed_parent_without_requeueing_forever() {
+        for bounded in [false, true] {
+            let (_temp, mut engine, root) = fixture();
+            let parent = root.join("removed");
+            let source = parent.join("missing").to_string_lossy().into_owned();
+            engine.retry.failure(&source, &source, "1");
+            engine.retry.entries.get_mut(&source).unwrap().next_retry = 1.0;
+            let result = engine
+                .reconcile_inner(parent.to_str().unwrap(), false, bounded)
+                .unwrap();
+            assert!(result.errors.is_empty());
+            assert!(engine.retry.entries.is_empty(), "bounded={bounded}");
+            assert!(engine.retry_paths(crate::model::now()).unwrap().is_empty());
+            assert!(
+                RetryState::new(engine.retry_path.clone(), 900., 86400.)
+                    .unwrap()
+                    .entries
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn missing_directory_step_retires_only_its_descendant_retries() {
         let (_temp, mut engine, root) = fixture();
-        let parent = root.join("removed");
-        let source = parent.join("missing").to_string_lossy().into_owned();
-        engine.retry.failure(&source, &source, "1");
-        engine.retry.entries.get_mut(&source).unwrap().next_retry = 1.0;
-        let result = engine.reconcile(parent.to_str().unwrap(), false).unwrap();
-        assert!(result.errors.is_empty());
-        assert!(engine.retry.entries.is_empty());
+        let missing = root.join("removed");
+        let unrelated = root
+            .join("removed-other/file")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir(root.join("removed-other")).unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+        for source in [
+            missing.join("file"),
+            missing.join("nested/file"),
+            PathBuf::from(&unrelated),
+        ] {
+            let source = source.to_str().unwrap();
+            engine.retry.failure(source, source, "dataless-file");
+            engine.retry.entries.get_mut(source).unwrap().next_retry = 1.0;
+        }
+        let retained = engine.retry.entries[&unrelated].clone();
+        let result = engine
+            .reconcile_step(missing.to_str().unwrap(), false)
+            .unwrap();
+        assert!(result.complete && result.errors.is_empty());
+        assert_eq!(engine.retry.entries.len(), 1);
+        assert_eq!(engine.retry.entries[&unrelated], retained);
+        let saved = RetryState::new(engine.retry_path.clone(), 900., 86400.).unwrap();
+        assert_eq!(saved.entries.len(), 1);
+        assert_eq!(saved.entries[&unrelated], retained);
+    }
+
+    #[test]
+    fn missing_directory_step_resolves_only_descendant_processing_events() {
+        let (_temp, mut engine, root) = fixture();
+        let missing = root.join("removed");
+        let child = missing.join("child");
+        let nested = missing.join("nested/child");
+        let sibling = root.join("removed-other/child");
+        let activity = crate::activity::Activity::new();
+        let _binding = activity.bind();
+        engine.retry.failure(
+            child.to_str().unwrap(),
+            child.to_str().unwrap(),
+            "dataless-file",
+        );
+        engine.retry.failure(
+            missing.to_str().unwrap(),
+            missing.to_str().unwrap(),
+            "dataless-file",
+        );
+        let retained = engine.retry.entries[missing.to_str().unwrap()].clone();
+        for path in [&child, &nested, &sibling, &missing] {
+            activity.processed(path.to_str().unwrap(), "deferred");
+        }
+        activity.failed("reading_metadata", Some(child.to_str().unwrap()));
+        engine
+            .reconcile_step(missing.to_str().unwrap(), false)
+            .unwrap();
+        let snapshot = activity.snapshot();
+        let events = snapshot["events"].as_array().unwrap();
+        assert_eq!(events[0]["resolution"], "absent");
+        assert_eq!(events[1]["resolution"], "absent");
+        assert!(
+            events[2..]
+                .iter()
+                .all(|event| event["resolved_at"].is_null())
+        );
+        assert_eq!(engine.retry.entries.len(), 1);
+        assert_eq!(engine.retry.entries[missing.to_str().unwrap()], retained);
     }
 
     #[test]

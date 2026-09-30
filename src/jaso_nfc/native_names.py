@@ -47,6 +47,30 @@ def actual_stored_name(parent_fd: int, name: str) -> str:
         if not actual or actual in (".", ".."):
             raise OSError(errno.EIO, "Native descriptor returned an invalid entry name", name)
         opened = os.fstat(descriptor)
+        if unicodedata.normalize("NFC", actual) != unicodedata.normalize("NFC", name):
+            if opened.st_nlink <= 1:
+                raise OSError(errno.ESTALE, "Descriptor no longer identifies the requested entry", name)
+            # An inode can have multiple hard-link names. Resolve the requested
+            # directory entry rather than adopting an unrelated descriptor alias.
+            scan_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+                              dir_fd=parent_fd)
+            try:
+                match = None
+                with os.scandir(scan_fd) as entries:
+                    for entry in entries:
+                        if unicodedata.normalize("NFC", entry.name) != unicodedata.normalize("NFC", name):
+                            continue
+                        mapped = os.stat(entry.name, dir_fd=parent_fd, follow_symlinks=False)
+                        if (opened.st_dev, opened.st_ino) != (mapped.st_dev, mapped.st_ino):
+                            raise OSError(errno.ESTALE, "Directory entry changed while resolving its stored name", name)
+                        if match is not None:
+                            raise OSError(errno.ESTALE, "Ambiguous directory spelling", name)
+                        match = entry.name
+                if match is not None:
+                    return match
+                raise FileNotFoundError(errno.ENOENT, "Requested directory entry is absent", name)
+            finally:
+                os.close(scan_fd)
         mapped = os.stat(actual, dir_fd=parent_fd, follow_symlinks=False)
         if (opened.st_dev, opened.st_ino) != (mapped.st_dev, mapped.st_ino):
             raise OSError(errno.ESTALE, "Directory entry changed while resolving its stored name", name)
