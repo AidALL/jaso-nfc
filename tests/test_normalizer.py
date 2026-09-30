@@ -464,6 +464,27 @@ class NormalizerTests(unittest.TestCase):
         self.assertEqual((self.root / "한글.txt").stat().st_ino, plain.stat().st_ino)
         self.assertEqual(plain.read_text(), "hardlink content")
 
+    @unittest.skipUnless(mod.sys.platform == "darwin", "Darwin descriptor path API")
+    def test_descriptor_returning_another_hardlink_keeps_the_requested_entry(self):
+        plain = self.root / "plain.txt"
+        plain.write_text("hardlink content")
+        source = self.root / nfd("한글.txt")
+        os.link(plain, source)
+        original = native_names.fcntl.fcntl
+
+        def alias_path(fd, command, argument):
+            if command == 50 and os.fstat(fd).st_ino == plain.stat().st_ino:
+                return os.fsencode(plain) + b"\0"
+            return original(fd, command, argument)
+
+        with mock.patch.object(native_names.fcntl, "fcntl", side_effect=alias_path):
+            result = self.engine().reconcile(str(self.root), True)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["renamed"], 1)
+        self.assertIn("한글.txt", os.listdir(self.root))
+        self.assertEqual((self.root / "한글.txt").stat().st_ino, plain.stat().st_ino)
+        self.assertEqual(plain.read_text(), "hardlink content")
+
     def test_recovery_precedes_processing_a_missing_nested_scope(self):
         folder = self.root / nfd("폴더")
         folder.mkdir()

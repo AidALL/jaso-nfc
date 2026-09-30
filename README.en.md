@@ -8,9 +8,9 @@ Repair decomposed or garbled Korean filenames. Jaso NFC automatically cleans up 
 
 ## Download
 
-[Download](https://github.com/garlicvread/jaso-nfc/releases/download/v0.2.1/Jaso-NFC-0.2.1-arm64-local.dmg)
+[Download](https://github.com/garlicvread/jaso-nfc/releases/download/v0.2.2/Jaso-NFC-0.2.2-arm64-local.dmg)
 
-0.2.1 · Apple Silicon Mac (M1 or later) · macOS 13 or later · Free / [MIT licensed](LICENSE)
+0.2.2 · Apple Silicon Mac (M1 or later) · macOS 13 or later · Free / [MIT licensed](LICENSE)
 
 ## Which names can change?
 
@@ -76,7 +76,7 @@ Close the window to leave cleanup running in the background. Choose `Quit Jaso N
 
 Open these instructions from `Settings` → `Open user guide…` in the app.
 
-[Complete user guide](docs/usage.en.md) · [Installation and upgrades](docs/installation.md) · [Release notes](https://github.com/garlicvread/jaso-nfc/releases/tag/v0.2.1)
+[Complete user guide](docs/usage.en.md) · [Installation and upgrades](docs/installation.md) · [Release notes](https://github.com/garlicvread/jaso-nfc/releases/tag/v0.2.2)
 
 Contact us through [GitHub issues](https://github.com/garlicvread/jaso-nfc/issues) or [aidall_manager@aidall.tech](mailto:aidall_manager@aidall.tech). Include the app version and status message. Before sharing information copied from `Settings` → `Advanced settings`, remove private filenames and paths.
 

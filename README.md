@@ -8,9 +8,9 @@
 
 ## 다운로드
 
-[다운로드](https://github.com/garlicvread/jaso-nfc/releases/download/v0.2.1/Jaso-NFC-0.2.1-arm64-local.dmg)
+[다운로드](https://github.com/garlicvread/jaso-nfc/releases/download/v0.2.2/Jaso-NFC-0.2.2-arm64-local.dmg)
 
-0.2.1 · Apple Silicon Mac(M1 이후) · macOS 13 이상 · 무료 / [MIT 라이선스](LICENSE)
+0.2.2 · Apple Silicon Mac(M1 이후) · macOS 13 이상 · 무료 / [MIT 라이선스](LICENSE)
 
 ## 어떤 이름이 바뀌나요?
 
@@ -76,7 +76,7 @@
 
 앱의 `설정` → `사용 설명서 열기…`에서도 안내를 확인하세요.
 
-[전체 사용 설명서](docs/usage.md) · [설치 및 업그레이드](docs/installation.md) · [릴리스 정보](https://github.com/garlicvread/jaso-nfc/releases/tag/v0.2.1)
+[전체 사용 설명서](docs/usage.md) · [설치 및 업그레이드](docs/installation.md) · [릴리스 정보](https://github.com/garlicvread/jaso-nfc/releases/tag/v0.2.2)
 
 문의는 [GitHub 이슈](https://github.com/garlicvread/jaso-nfc/issues) 또는 [aidall_manager@aidall.tech](mailto:aidall_manager@aidall.tech)로 보내 주세요. 앱 버전과 상태 메시지를 함께 알려 주세요. `설정` → `상세 설정`에서 복사한 진단 정보를 공유하기 전에는 개인 파일명과 경로를 지워 주세요.
 

@@ -66,6 +66,37 @@ class NativeNameTests(unittest.TestCase):
                 native_names.actual_stored_name(4, "file")
         self.assertEqual(raised.exception.errno, errno.ESTALE)
 
+    def test_unrelated_descriptor_name_without_hardlinks_is_rejected(self):
+        with patch.object(native_names.sys, "platform", "darwin"), \
+                patch.object(native_names.os, "open", return_value=10), \
+                patch.object(native_names.os, "close"), \
+                patch.object(native_names.os, "fstat", return_value=SimpleNamespace(st_dev=1, st_ino=2, st_nlink=1)), \
+                patch.object(native_names.os, "scandir", side_effect=AssertionError("unexpected listing")), \
+                patch.object(native_names.fcntl, "fcntl", return_value=b"/owned/alias\0"):
+            with self.assertRaises(OSError) as raised:
+                native_names.actual_stored_name(4, "requested")
+            self.assertEqual(raised.exception.errno, errno.ESTALE)
+
+    def test_hardlink_alias_fallback_rejects_changed_absent_or_ambiguous_entries(self):
+        name = unicodedata.normalize("NFD", "파일")
+        for names, inode, expected in (([name], 3, errno.ESTALE),
+                                       ([], 2, errno.ENOENT),
+                                       ([name, "파일"], 2, errno.ESTALE)):
+            with self.subTest(names=names, inode=inode), \
+                    patch.object(native_names.sys, "platform", "darwin"), \
+                    patch.object(native_names.os, "open", side_effect=[10, 11]), \
+                    patch.object(native_names.os, "close") as close, \
+                    patch.object(native_names.os, "fstat", return_value=SimpleNamespace(st_dev=1, st_ino=2, st_nlink=2)), \
+                    patch.object(native_names.os, "stat", return_value=SimpleNamespace(st_dev=1, st_ino=inode)), \
+                    patch.object(native_names.os, "scandir") as scan, \
+                    patch.object(native_names.fcntl, "fcntl", return_value=b"/owned/alias\0"):
+                scan.return_value.__enter__.return_value = iter(SimpleNamespace(name=n) for n in names)
+                with self.assertRaises(OSError) as raised:
+                    native_names.actual_stored_name(4, name)
+                self.assertEqual(raised.exception.errno, expected)
+                scan.assert_called_once_with(11)
+                self.assertEqual([call.args[0] for call in close.call_args_list], [11, 10])
+
     def test_only_single_entry_names_are_accepted(self):
         for name in ("", ".", "..", "/absolute", "child/file"):
             with self.subTest(name=name), self.assertRaises(ValueError):
